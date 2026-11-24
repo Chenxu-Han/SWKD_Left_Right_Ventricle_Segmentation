@@ -72,8 +72,6 @@ python train.py --teacher weights/sam_vit_b_01ec64.pth --train-list data/LVRV-tr
 
 Use `--student Mobile_UNet` or `--student FssNet` for the other students. This runs both training stages. Training and distillation defaults are in [config.py](config.py).
 
-Each stage saves `best.pth`, `last.pth`, training logs, and validation previews. Resume restores the model, optimizer, learning-rate scheduler, training progress, and random states from the end of the last saved epoch. An interrupted, unsaved epoch is repeated. To resume, retain both checkpoints and use the original training options:
-
 ```bash
 python train.py --teacher weights/sam_vit_b_01ec64.pth --train-list data/LVRV-train.txt --val-list data/LVRV-val.txt --student DeepLabV3_MobileNetV2 --run-dir runs/deeplab --resume runs/deeplab/stage2/last.pth
 ```
@@ -86,8 +84,6 @@ UAW is averaged over the full batch. Checkpoints record this reduction; older ch
 ```bash
 python test.py --weights runs/deeplab/stage2/best.pth --test-list data/LVRV-test.txt --output results/deeplab
 ```
-
-Evaluation uses the paper's 128 × 128 grid and saves per-image and summary CSV files with DSC and HD95 (pixels). Empty reference masks are excluded from organ averages; an empty prediction with a nonempty reference receives the image diagonal as HD95. See [utils/metrics.py](utils/metrics.py).
 
 Use `--resolution original` for evaluation at the original image size, or `--external` for datasets outside the seven primary datasets. The original-resolution results use a different evaluation grid and should be reported separately.
 
