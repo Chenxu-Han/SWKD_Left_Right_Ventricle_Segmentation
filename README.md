@@ -76,8 +76,7 @@ Use `--student Mobile_UNet` or `--student FssNet` for the other students. This r
 python train.py --teacher weights/sam_vit_b_01ec64.pth --train-list data/LVRV-train.txt --val-list data/LVRV-val.txt --student DeepLabV3_MobileNetV2 --run-dir runs/deeplab --resume runs/deeplab/stage2/last.pth
 ```
 
-Stage 2 fixes the encoder, including batch normalization statistics. Teacher output distillation uses one positive point per organ for images with nonempty LV and RV masks; all training images receive segmentation supervision.
-UAW is averaged over the full batch. Checkpoints record this reduction; older checkpoints using an eligible-sample average remain loadable for inference but require their original training code to resume.
+Stage 2 freezes the encoder and trains the decoder with segmentation supervision and UAW distillation.
 
 ## Evaluation
 
