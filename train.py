@@ -66,7 +66,8 @@ def validate(student, loader, device, preview_path=None, seed=42):
 def train_stage(stage, student, teacher, train_data, val_loader, args, run_dir):
     folder = run_dir / f"stage{stage}"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "previews").mkdir(exist_ok=True)
+    if stage == 2:
+        (folder / "previews").mkdir(exist_ok=True)
     device = torch.device(args.device)
     frd = FRDLoss(student.feature_channels).to(device) if stage == 1 else None
     uaw = UAWLoss().to(device) if stage == 2 else None
@@ -83,10 +84,15 @@ def train_stage(stage, student, teacher, train_data, val_loader, args, run_dir):
     run_config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     run_config.update({"stage": stage, "image_size": config.IMAGE_SIZE, "alpha": config.ALPHA, "gamma": config.GAMMA, "temperature": config.TEMPERATURE, "margin": config.MARGIN, "uaw_weight": config.UAW_WEIGHT, "dice_weight": config.DICE_WEIGHT, "patience": config.PATIENCE, })
     run_config["uaw_reduction"] = "batch_mean"
-    state = {"epoch": 0, "step": 0, "best": -1.0, "bad_epochs": 0, "finished": False}
+    run_config["checkpoint_selection"] = "last_epoch" if stage == 1 else "validation_dsc"
+    state = {"epoch": 0, "step": 0, "finished": False}
+    if stage == 2:
+        state.update({"best": -1.0, "bad_epochs": 0})
     if args.resume is not None and args.resume.parent == folder:
         previous = torch.load(args.resume, map_location="cpu", weights_only=False)["config"]
         previous = {key.lower(): value for key, value in previous.items()}
+        if stage == 1 and previous.get("checkpoint_selection") != "last_epoch":
+            raise ValueError("This Stage 1 checkpoint used DSC selection; start a new run with fixed-epoch feature training.")
         if stage == 2 and previous.get("uaw_reduction") != "batch_mean":
             raise ValueError("This checkpoint averages UAW over eligible samples; resume it with the original training code.")
         for key in ("student", "train_list", "val_list", "teacher", "data_root", "batch_size", "seed", "learning_rate", "image_size", "alpha", "gamma", "temperature", "margin", "epochs", "patience", "dice_weight", "uaw_weight", "inputs",):
@@ -106,9 +112,6 @@ def train_stage(stage, student, teacher, train_data, val_loader, args, run_dir):
         loss_sum, seen = 0.0, 0
         for batch in progress:
             images = batch["image"].to(device, non_blocking=True)
-            target = batch["target"].to(device)
-            masks = batch["masks"].to(device)
-            available = batch["available"].to(device)
             optimizer.zero_grad(set_to_none=True)
             if stage == 1:
                 with torch.no_grad():
@@ -117,6 +120,9 @@ def train_stage(stage, student, teacher, train_data, val_loader, args, run_dir):
                 loss = frd(feature, reference)
                 distillation = loss.detach()
             else:
+                target = batch["target"].to(device)
+                masks = batch["masks"].to(device)
+                available = batch["available"].to(device)
                 output = student.forward_all(images, config.TEMPERATURE)
                 loss = segmentation_loss(output, target, masks)
                 eligible = available.all(1) & masks.flatten(2).any(2).all(1)
@@ -135,20 +141,23 @@ def train_stage(stage, student, teacher, train_data, val_loader, args, run_dir):
             loss_sum += loss.item() * len(images)
             seen += len(images)
             progress.set_postfix(loss=f"{loss.item():.5f}", distill=f"{distillation.item():.5f}")
-        metrics = validate(student, val_loader, device, folder / "previews" / f"epoch_{epoch + 1:03d}.png", args.seed + epoch)
-        improved = metrics["Mean_DSC"] > state["best"]
-        state["best"] = max(state["best"], metrics["Mean_DSC"])
-        state["bad_epochs"] = 0 if improved else state["bad_epochs"] + 1
+        metrics = {}
+        improved = False
+        if stage == 2:
+            metrics = validate(student, val_loader, device, folder / "previews" / f"epoch_{epoch + 1:03d}.png", args.seed + epoch)
+            improved = metrics["Mean_DSC"] > state["best"]
+            state["best"] = max(state["best"], metrics["Mean_DSC"])
+            state["bad_epochs"] = 0 if improved else state["bad_epochs"] + 1
         write_log(folder / "epochs.csv", {"Epoch": epoch + 1, "Loss": loss_sum / seen, "LR": optimizer.param_groups[0]["lr"], **metrics}, )
         scheduler.step()
-        state.update({"epoch": epoch + 1, "finished": epoch + 1 == args.epochs or state["bad_epochs"] >= config.PATIENCE, })
+        state.update({"epoch": epoch + 1, "finished": epoch + 1 == args.epochs or (stage == 2 and state["bad_epochs"] >= config.PATIENCE), })
         if improved:
             save_checkpoint(folder / "best.pth", student, frd, optimizer, scheduler, state, run_config)
         save_checkpoint(folder / "last.pth", student, frd, optimizer, scheduler, state, run_config)
-        print(f"Stage {stage}, epoch {epoch + 1}: {metrics}")
-    best = torch.load(folder / "best.pth", map_location="cpu", weights_only=False)
-    student.load_state_dict(best["model_state_dict"], strict=True)
-    return best
+        print(f"Stage {stage}, epoch {epoch + 1}: loss={loss_sum / seen:.5f}" + (f", {metrics}" if metrics else ""))
+    selected = torch.load(folder / ("last.pth" if stage == 1 else "best.pth"), map_location="cpu", weights_only=False)
+    student.load_state_dict(selected["model_state_dict"], strict=True)
+    return selected
 
 
 def main(args):
@@ -164,8 +173,10 @@ def main(args):
         start_stage = start_stage.get("stage", start_stage.get("Stage"))
         if start_stage not in (1, 2) or args.resume.parent != run_dir / f"stage{start_stage}":
             raise ValueError("Resume must be a checkpoint inside the selected run and stage directory.")
-        if args.resume.name != "last.pth" or not (args.resume.parent / "best.pth").is_file():
-            raise ValueError("Resume requires last.pth and the accompanying best.pth from the same run.")
+        if args.resume.name != "last.pth":
+            raise ValueError("Resume requires the last.pth checkpoint from the selected stage.")
+        if start_stage == 2 and not (args.resume.parent / "best.pth").is_file():
+            raise ValueError("Stage 2 resume also requires best.pth from the same run.")
         if start_stage == 1 and (run_dir / "stage2" / "last.pth").exists():
             raise ValueError("Stage 2 has already started; resume its last.pth checkpoint.")
     elif run_dir.exists() and any(run_dir.iterdir()):
@@ -191,7 +202,7 @@ def main(args):
     args.inputs["included"] = {"train": len(train_data), "validation": len(val_data)}
     args.inputs["excluded"] = {"train": dict(train_data.excluded), "validation": dict(val_data.excluded)}
     if start_stage == 1:
-        train_stage(1, student, teacher, train_data, val_loader, args, run_dir)
+        train_stage(1, student, teacher, train_data, None, args, run_dir)
     train_stage(2, student, teacher, train_data, val_loader, args, run_dir)
     print(f"Inference weights: {run_dir / 'stage2' / 'best.pth'}")
 

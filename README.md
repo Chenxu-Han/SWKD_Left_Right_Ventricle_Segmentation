@@ -76,7 +76,7 @@ Use `--student Mobile_UNet` or `--student FssNet` for the other students. This r
 python train.py --teacher weights/sam_vit_b_01ec64.pth --train-list data/LVRV-train.txt --val-list data/LVRV-val.txt --student DeepLabV3_MobileNetV2 --run-dir runs/deeplab --resume runs/deeplab/stage2/last.pth
 ```
 
-Stage 2 freezes the encoder and trains the decoder with segmentation supervision and UAW distillation.
+Stage 1 trains for the configured epochs and passes the final encoder to Stage 2, which trains the decoder and selects the best checkpoint by validation DSC.
 
 ## Evaluation
 
